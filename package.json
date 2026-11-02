@@ -1,0 +1,18 @@
+{
+  "name": "prisme",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/web"],
+  "scripts": {
+    "dev": "npm run dev --workspace @prisme/web",
+    "build": "npm run build --workspace @prisme/web",
+    "start": "npm run start --workspace @prisme/web",
+    "typecheck": "npm run typecheck --workspace @prisme/web",
+    "test:e2e": "playwright test",
+    "api:dev": "services\\api\\.venv\\Scripts\\python.exe services/api/run.py --reload --port 8000",
+    "api:test": "services\\api\\.venv\\Scripts\\python.exe -m pytest -c services/api/pyproject.toml services/api/tests",
+    "api:migrate": "services\\api\\.venv\\Scripts\\python.exe -m alembic -c services/api/alembic.ini upgrade head"
+  },
+  "engines": { "node": ">=22.0.0" },
+  "devDependencies": { "@playwright/test": "^1.58.0" }
+}

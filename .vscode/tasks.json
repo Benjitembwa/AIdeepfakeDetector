@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "Prisme : lancer le site", "type": "shell", "command": "npm", "windows": { "command": "npm.cmd" }, "args": ["run", "dev"], "isBackground": true, "problemMatcher": [], "presentation": { "reveal": "always", "panel": "dedicated" } },
+    { "label": "Prisme : lancer l’API", "type": "shell", "command": "npm", "windows": { "command": "npm.cmd" }, "args": ["run", "api:dev"], "isBackground": true, "problemMatcher": [], "presentation": { "reveal": "always", "panel": "dedicated" } },
+    { "label": "Prisme : lancer le projet", "dependsOrder": "parallel", "dependsOn": ["Prisme : lancer le site", "Prisme : lancer l’API"], "problemMatcher": [] },
+    { "label": "Prisme : migrer PostgreSQL", "type": "shell", "command": "npm", "windows": { "command": "npm.cmd" }, "args": ["run", "api:migrate"], "problemMatcher": [] },
+    { "label": "Prisme : tester l’API", "type": "shell", "command": "npm", "windows": { "command": "npm.cmd" }, "args": ["run", "api:test"], "problemMatcher": [] },
+    { "label": "Prisme : vérifier TypeScript", "type": "shell", "command": "npm", "windows": { "command": "npm.cmd" }, "args": ["run", "typecheck"], "problemMatcher": ["$tsc"] },
+    { "label": "Prisme : compiler le site", "type": "shell", "command": "npm", "windows": { "command": "npm.cmd" }, "args": ["run", "build"], "problemMatcher": [] }
+  ]
+}
