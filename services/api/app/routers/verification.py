@@ -57,7 +57,7 @@ async def blockchain_provenance(record: ImageRecord) -> BlockchainProvenance:
     if not record.sha256 or not record.ipfs_cid or not record.metadata_cid:
         return BlockchainProvenance(status="not_registered", **values)
     try:
-        onchain = await get_registry().get_image(record.sha256)
+        onchain = await get_registry(record.blockchain_contract_address).get_image(record.sha256)
     except (RegistryUnavailable, ValueError):
         return BlockchainProvenance(status="unavailable", **values)
     if onchain is None:

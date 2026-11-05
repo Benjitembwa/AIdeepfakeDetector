@@ -40,8 +40,7 @@ class Settings(BaseSettings):
     base_rpc_url: str = "https://sepolia.base.org"
     base_chain_id: int = 84532
     base_explorer_url: str = "https://sepolia.basescan.org"
-    registry_contract_address: str = "0x12DD566159a151Ab14009BC5d7624519C60c3647"
-    registry_private_key: SecretStr | None = None
+    registry_contract_address: str = "0x0000000000000000000000000000000000000000"
     blockchain_receipt_timeout_seconds: float = 90.0
     c2pa_sign_cert_path: Path = ENV_FILE.parent / "tests/fixtures/c2pa/es256_certs.pem"
     c2pa_private_key_path: Path = ENV_FILE.parent / "tests/fixtures/c2pa/es256_private.key"

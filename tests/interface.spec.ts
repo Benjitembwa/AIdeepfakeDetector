@@ -5,6 +5,32 @@ async function upload(page: Page) { await page.locator('input[type="file"]').set
 
 const media = { id: "11111111-1111-4111-8111-111111111111", name: "Le Journal Horizon", slug: "le-journal-horizon", email: "redaction@prisme.fr", is_active: true, created_at: "2026-10-31T10:00:00Z" };
 const image = { id: "22222222-2222-4222-8222-222222222222", media_id: media.id, title: "Le marché au matin", author: "Camille Test", source_url: "https://example.org/reportage", license: "Tous droits réservés", description: "Une image de test pour le prototype.", original_filename: "photo-test.png", media_type: "image/png", size_bytes: png.length, width: 1, height: 1, status: "registered", sha256: "a".repeat(64), perceptual_hash: "0123456789abcdef", difference_hash: "0123456789abcdef", wavelet_hash: "0123456789abcdef", fingerprint_version: 1, orb_descriptor_count: 24, ipfs_cid: "bafy-image", ipfs_url: "https://demo.mypinata.cloud/ipfs/bafy-image", metadata_cid: "bafy-json", metadata_sha256: "b".repeat(64), metadata_url: "https://demo.mypinata.cloud/ipfs/bafy-json", blockchain_tx_hash: `0x${"c".repeat(64)}`, blockchain_chain_id: 84532, blockchain_contract_address: "0x12DD566159a151Ab14009BC5d7624519C60c3647", blockchain_publisher_address: "0x9f06FcF98fDB0B374E63FdE559590bF2CA472E81", blockchain_block_number: 52962708, blockchain_registered_at: "2026-10-31T10:06:00Z", blockchain_explorer_url: `https://sepolia.basescan.org/tx/0x${"c".repeat(64)}`, revocation_tx_hash: null, revoked_at: null, registration_error: null, c2pa_status: "valid_untrusted", c2pa_active_manifest: "urn:c2pa:test", c2pa_claim_generator: "Prisme", c2pa_issuer: "C2PA Test Signing Cert", c2pa_validation_codes: '["signingCredential.untrusted"]', c2pa_asset_sha256: "e".repeat(64), c2pa_asset_size_bytes: png.length + 1024, created_at: "2026-10-31T10:05:00Z", updated_at: "2026-10-31T10:05:00Z" };
+const wallet = "0x9f06FcF98fDB0B374E63FdE559590bF2CA472E81";
+const contract = "0x12DD566159a151Ab14009BC5d7624519C60c3647";
+
+async function mockWallet(page: Page) {
+  await page.addInitScript(({ account }) => {
+    let transactionNumber = 0;
+    Object.defineProperty(window, "ethereum", {
+      configurable: true,
+      value: {
+        request: async ({ method }: { method: string }) => {
+          if (method === "eth_accounts" || method === "eth_requestAccounts") return [account];
+          if (method === "eth_chainId") return "0x14a34";
+          if (method === "wallet_switchEthereumChain" || method === "wallet_addEthereumChain") return null;
+          if (method === "eth_sendTransaction") {
+            transactionNumber += 1;
+            return `0x${transactionNumber.toString(16).padStart(64, "0")}`;
+          }
+          if (method === "eth_getTransactionReceipt") return { status: "0x1" };
+          throw new Error(`Unsupported wallet method: ${method}`);
+        },
+        on: () => undefined,
+        removeListener: () => undefined,
+      },
+    });
+  }, { account: wallet });
+}
 
 async function mockMediaApi(page: Page) {
   let images: typeof image[] = [];
@@ -13,13 +39,19 @@ async function mockMediaApi(page: Page) {
     const url = new URL(request.url());
     if (url.pathname === "/api/v1/auth/register" || url.pathname === "/api/v1/auth/token") return route.fulfill({ status: url.pathname.endsWith("register") ? 201 : 200, contentType: "application/json", body: JSON.stringify({ access_token: "test-token", token_type: "bearer", expires_in: 1800, media }) });
     if (url.pathname === "/api/v1/media/me") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(media) });
-    if (url.pathname === "/api/v1/images" && request.method() === "POST") { images = [image, ...images]; return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify(image) }); }
+    if (url.pathname === "/api/v1/images" && request.method() === "POST") {
+      const prepared = { ...image, status: "ipfs_stored", blockchain_tx_hash: null, blockchain_block_number: null, blockchain_registered_at: null, blockchain_explorer_url: null };
+      images = [prepared as typeof image, ...images];
+      return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ image: prepared, transaction: { chain_id: 84532, chain_id_hex: "0x14a34", contract_address: contract, from_address: wallet, data: "0x1234", value: "0x0" } }) });
+    }
+    if (url.pathname.endsWith(`/images/${image.id}/confirm-registration`) && request.method() === "POST") { images = [image]; return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(image) }); }
+    if (url.pathname.endsWith(`/images/${image.id}/prepare-revocation`) && request.method() === "POST") return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ image, transaction: { chain_id: 84532, chain_id_hex: "0x14a34", contract_address: contract, from_address: wallet, data: "0x5678", value: "0x0" } }) });
+    if (url.pathname.endsWith(`/images/${image.id}/confirm-revocation`) && request.method() === "POST") { const revoked = { ...image, status: "revoked", revocation_tx_hash: `0x${"d".repeat(64)}`, revoked_at: "2026-10-31T10:10:00Z" }; images = [revoked as typeof image]; return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(revoked) }); }
     if (url.pathname === "/api/v1/images" && request.method() === "GET") {
       const search = (url.searchParams.get("search") ?? "").toLocaleLowerCase("fr");
       const filtered = search && !` ${image.title} ${image.author} ${image.original_filename}`.toLocaleLowerCase("fr").includes(search) ? [] : images;
       return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: filtered, total: filtered.length, limit: 25, offset: 0 }) });
     }
-    if (url.pathname.startsWith("/api/v1/images/") && request.method() === "DELETE") { images = images.map(item => url.pathname.endsWith(item.id) ? { ...item, status: "revoked", revocation_tx_hash: `0x${"d".repeat(64)}`, revoked_at: "2026-10-31T10:10:00Z" } : item); return route.fulfill({ status: 204, body: "" }); }
     return route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ detail: "Not found" }) });
   });
 }
@@ -77,8 +109,11 @@ test("les fichiers incompatibles, trop lourds et illisibles sont refusés", asyn
 });
 
 test("un média publie, retrouve, exporte et révoque une preuve", async ({ page }) => {
+  await mockWallet(page);
   await mockMediaApi(page);
   await page.goto("/medias");
+  await page.getByRole("button", { name: "Connecter MetaMask" }).click();
+  await expect(page.getByText("Base Sepolia", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Créer un compte" }).click();
   await page.getByLabel("Nom du média").fill("Le Journal Horizon");
   await page.getByLabel("Adresse e-mail").fill("redaction@prisme.fr");
@@ -89,12 +124,12 @@ test("un média publie, retrouve, exporte et révoque une preuve", async ({ page
   await page.getByLabel("Titre de la photo").fill("Le marché au matin");
   await page.getByLabel("Photographe", { exact: false }).fill("Camille Test");
   await page.getByRole("checkbox").check();
-  await page.getByRole("button", { name: "Enregistrer sur IPFS et Base Sepolia" }).click();
+  await page.getByRole("button", { name: "Préparer et signer avec MetaMask" }).click();
   await expect(page.getByRole("main").getByRole("alert")).toContainText("Ajoutez une image");
   await upload(page);
   await page.getByLabel("URL de publication").fill("https://example.org/reportage");
   await page.getByLabel("Contexte de la photo").fill("Une image de test pour le prototype.");
-  await page.getByRole("button", { name: "Enregistrer sur IPFS et Base Sepolia" }).click();
+  await page.getByRole("button", { name: "Préparer et signer avec MetaMask" }).click();
   await expect(page.getByRole("status")).toContainText("enregistrée sur Base Sepolia");
   await expect(page.getByRole("row", { name: /Le marché au matin/ })).toBeVisible();
   await page.reload();

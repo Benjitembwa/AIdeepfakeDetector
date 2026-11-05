@@ -4,15 +4,20 @@ import { FormEvent, RefObject, useEffect, useRef, useState } from "react";
 import {
   ArrowRight, Ban, Building2, Check, Database, Download, ExternalLink,
   FileImage, Info, LoaderCircle, LockKeyhole, LogOut, Plus, RotateCcw,
-  Search, ShieldCheck, Trash2, X,
+  Search, ShieldCheck, Trash2, Wallet, X,
 } from "lucide-react";
 import { ImageDropzone } from "@/components/image-dropzone";
 import { formatSize, SelectedImage } from "@/lib/files";
 import {
-  ApiError, ApiImage, AuthSession, clearSession, createImage, deleteImage,
-  exportImage, getCurrentMedia, listImages, loginMedia, readSession,
-  registerMedia, retryImageRegistration, storeSession,
+  ApiError, ApiImage, AuthSession, WalletActionResponse, clearSession,
+  confirmImageRegistration, confirmImageRevocation, createImage, deleteImage,
+  exportImage, getCurrentMedia, listImages, loginMedia, prepareImageRegistration,
+  prepareImageRevocation, readSession, registerMedia, storeSession,
 } from "@/lib/api";
+import {
+  BASE_SEPOLIA_CHAIN_ID, WalletError, connectWallet, currentWallet,
+  getWalletProvider, sendWalletTransaction, waitForWalletReceipt,
+} from "@/lib/wallet";
 
 type AuthMode = "login" | "register";
 
@@ -42,6 +47,9 @@ export function MediaWorkspace() {
   const [submitting, setSubmitting] = useState(false);
   const [activeImage, setActiveImage] = useState<ApiImage | null>(null);
   const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [walletChainId, setWalletChainId] = useState<string | null>(null);
+  const [walletLoading, setWalletLoading] = useState(false);
   const form = useRef<HTMLFormElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const fileArea = useRef<HTMLDivElement>(null);
@@ -62,13 +70,81 @@ export function MediaWorkspace() {
 
   useEffect(() => { if (activeImage) dialog.current?.showModal(); }, [activeImage]);
 
+  useEffect(() => {
+    const provider = getWalletProvider();
+    if (!provider) return;
+    void currentWallet().then(wallet => {
+      setWalletAddress(wallet.address);
+      setWalletChainId(wallet.chainId);
+    });
+    const accountsChanged = (...args: unknown[]) => {
+      const accounts = args[0];
+      setWalletAddress(Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : null);
+    };
+    const chainChanged = (...args: unknown[]) => {
+      setWalletChainId(typeof args[0] === "string" ? args[0].toLowerCase() : null);
+    };
+    provider.on?.("accountsChanged", accountsChanged);
+    provider.on?.("chainChanged", chainChanged);
+    return () => {
+      provider.removeListener?.("accountsChanged", accountsChanged);
+      provider.removeListener?.("chainChanged", chainChanged);
+    };
+  }, []);
+
+  const walletReady = Boolean(walletAddress && walletChainId === BASE_SEPOLIA_CHAIN_ID);
+
   function handleApiError(reason: unknown) {
     if (reason instanceof ApiError && reason.status === 401) {
       clearSession(); setAuth(null); setImages([]);
       setError("Votre session a expiré. Reconnectez-vous.");
     } else {
-      setError(reason instanceof ApiError ? reason.message : "Une erreur inattendue est survenue.");
+      setError(reason instanceof ApiError || reason instanceof WalletError || reason instanceof Error
+        ? reason.message : "Une erreur inattendue est survenue.");
     }
+  }
+
+  async function requestWallet() {
+    setError(""); setWalletLoading(true);
+    try {
+      const address = await connectWallet();
+      const wallet = await currentWallet();
+      setWalletAddress(address); setWalletChainId(wallet.chainId);
+      setMessage("Portefeuille connecté à Base Sepolia.");
+    } catch (reason) { handleApiError(reason); }
+    finally { setWalletLoading(false); }
+  }
+
+  function replaceImage(updated: ApiImage) {
+    setImages(current => current.map(item => item.id === updated.id ? updated : item));
+    setActiveImage(current => current?.id === updated.id ? updated : current);
+  }
+
+  async function completeRegistration(action: WalletActionResponse): Promise<ApiImage> {
+    if (!auth) return action.image;
+    const txHash = action.transaction
+      ? await sendWalletTransaction(action.transaction)
+      : action.image.blockchain_tx_hash;
+    if (!txHash) return action.image;
+    replaceImage({ ...action.image, status: "blockchain_pending", blockchain_tx_hash: txHash });
+    const firstCheck = await confirmImageRegistration(auth.accessToken, action.image.id, txHash);
+    replaceImage(firstCheck);
+    if (firstCheck.status === "registered" || firstCheck.status === "revoked") return firstCheck;
+    await waitForWalletReceipt(txHash);
+    return confirmImageRegistration(auth.accessToken, action.image.id, txHash);
+  }
+
+  async function completeRevocation(action: WalletActionResponse): Promise<ApiImage> {
+    if (!auth) return action.image;
+    const txHash = action.transaction
+      ? await sendWalletTransaction(action.transaction)
+      : action.image.revocation_tx_hash;
+    if (!txHash) return action.image;
+    const firstCheck = await confirmImageRevocation(auth.accessToken, action.image.id, txHash);
+    replaceImage(firstCheck);
+    if (firstCheck.status === "revoked") return firstCheck;
+    await waitForWalletReceipt(txHash);
+    return confirmImageRevocation(auth.accessToken, action.image.id, txHash);
   }
 
   async function authenticate(event: FormEvent<HTMLFormElement>) {
@@ -100,25 +176,32 @@ export function MediaWorkspace() {
       setError("Ajoutez une image avant de publier sa preuve.");
       fileArea.current?.scrollIntoView({ behavior: "smooth" }); return;
     }
+    if (!walletAddress || !walletReady) {
+      setError("Connectez MetaMask à Base Sepolia avant de préparer la publication.");
+      return;
+    }
     setSubmitting(true);
-    const data = new FormData(event.currentTarget); data.set("image", selected.file);
+    const data = new FormData(event.currentTarget);
+    data.set("image", selected.file); data.set("wallet_address", walletAddress);
     try {
-      const created = await createImage(auth.accessToken, data);
-      setImages(current => [created, ...current]); form.current?.reset(); setSelected(null);
-      setMessage(created.status === "registered"
-        ? `« ${created.title} » est publiée sur IPFS et enregistrée sur Base Sepolia.`
-        : `« ${created.title} » est sur IPFS ; l’enregistrement blockchain doit être repris.`);
+      const prepared = await createImage(auth.accessToken, data);
+      setImages(current => [prepared.image, ...current]); form.current?.reset(); setSelected(null);
+      setMessage("Preuves IPFS préparées. Confirmez maintenant la transaction dans MetaMask.");
+      const confirmed = await completeRegistration(prepared);
+      replaceImage(confirmed);
+      setMessage(`« ${confirmed.title} » est enregistrée sur Base Sepolia par votre portefeuille.`);
     } catch (reason) { handleApiError(reason); }
     finally { setSubmitting(false); }
   }
 
   async function retryRegistration(image: ApiImage) {
     if (!auth) return;
+    if (!walletReady) { setError("Connectez le portefeuille lié à cette preuve sur Base Sepolia."); return; }
     setError(""); setMessage(""); setSubmitting(true);
     try {
-      const updated = await retryImageRegistration(auth.accessToken, image.id);
-      setImages(current => current.map(item => item.id === updated.id ? updated : item));
-      setActiveImage(current => current?.id === updated.id ? updated : current);
+      const prepared = await prepareImageRegistration(auth.accessToken, image.id);
+      const updated = await completeRegistration(prepared);
+      replaceImage(updated);
       setMessage(updated.status === "registered"
         ? `« ${updated.title} » est maintenant confirmée sur Base Sepolia.`
         : "La transaction est toujours en attente ; la reprise reste idempotente.");
@@ -128,13 +211,21 @@ export function MediaWorkspace() {
 
   async function remove(image: ApiImage) {
     if (!auth) return;
+    if (image.status === "registered" && !walletReady) {
+      setError("Connectez le portefeuille ayant publié cette preuve sur Base Sepolia."); return;
+    }
     setError("");
     try {
-      await deleteImage(auth.accessToken, image.id);
-      await refreshImages(); setDeleteCandidate(null); setActiveImage(null);
-      setMessage(image.blockchain_tx_hash
-        ? "La preuve a été révoquée sur Base Sepolia et désépinglée de Pinata. La trace PostgreSQL est conservée."
-        : "La publication incomplète a été supprimée et désépinglée.");
+      if (image.status === "registered") {
+        const prepared = await prepareImageRevocation(auth.accessToken, image.id);
+        const updated = await completeRevocation(prepared);
+        replaceImage(updated); setDeleteCandidate(null); setActiveImage(null);
+        setMessage("La révocation a été confirmée dans MetaMask et archivée par Prisme.");
+      } else {
+        await deleteImage(auth.accessToken, image.id);
+        await refreshImages(); setDeleteCandidate(null); setActiveImage(null);
+        setMessage("La publication incomplète a été supprimée et désépinglée.");
+      }
     } catch (reason) { handleApiError(reason); }
   }
 
@@ -146,7 +237,8 @@ export function MediaWorkspace() {
   return <div className="page-content">
     <div className="page-eyebrow"><span className="eyebrow-line" /> L’ORIGINE COMMENCE AVEC VOUS</div>
     <div className="intro-row"><div><h1>Espace média<span className="accent-dot">.</span></h1><p className="page-description">Documentez la provenance de vos photos,<br className="desktop-break" /> avec des preuves publiques et vérifiables.</p></div>{auth && <button className="button button-secondary" onClick={logout}><LogOut size={16} />Se déconnecter</button>}</div>
-    <div className="notice media-notice"><Info size={18} /><p><strong>Publication publique.</strong> Une provenance C2PA est signée, puis l’image et son JSON sont téléversés sur IPFS via Pinata et leurs preuves inscrites sur Base Sepolia. Le certificat actuel est réservé au prototype.</p></div>
+    <div className="notice media-notice"><Info size={18} /><p><strong>Signature personnelle.</strong> Prisme prépare C2PA et IPFS, puis MetaMask vous demande de confirmer chaque enregistrement ou révocation sur Base Sepolia. Aucune clé privée n’est confiée au serveur.</p></div>
+    <section className="panel wallet-panel"><div className="wallet-copy"><span className="feature-icon teal"><Wallet size={22} /></span><div><strong>Portefeuille de publication</strong><p>{walletAddress ? `${walletAddress.slice(0, 8)}…${walletAddress.slice(-6)}` : "Connectez MetaMask pour publier."}</p></div></div><div className="row-actions"><span className={`tag ${walletReady ? "green" : ""}`}>{walletReady ? "Base Sepolia" : walletAddress ? "Mauvais réseau" : "Non connecté"}</span><button className="button button-secondary" type="button" onClick={() => void requestWallet()} disabled={walletLoading}>{walletLoading ? <LoaderCircle className="spin" size={16} /> : <Wallet size={16} />}{walletAddress ? "Changer ou reconnecter" : "Connecter MetaMask"}</button></div></section>
     {loading ? <div className="panel loading-panel"><LoaderCircle className="spin" size={25} />Restauration de la session…</div>
       : !auth ? <AuthPanel mode={authMode} setMode={setAuthMode} submit={authenticate} submitting={submitting} error={error} />
       : <>
@@ -162,10 +254,10 @@ export function MediaWorkspace() {
               <div><label htmlFor="license">Droits d’utilisation <span>*</span></label><select name="license" id="license" required defaultValue="Tous droits réservés"><option>Tous droits réservés</option><option>CC BY 4.0</option><option>CC BY-SA 4.0</option><option>CC0</option></select></div>
               <div><label htmlFor="description">Contexte de la photo <small>facultatif</small></label><textarea id="description" name="description" rows={3} maxLength={1200} placeholder="Lieu, événement, date de prise de vue…" /></div>
               <label className="checkbox-label"><input name="rights" type="checkbox" required /><span>Je confirme disposer des droits nécessaires et certifie les informations de provenance fournies. <span>*</span></span></label>
-              <div className="form-actions"><span>Champs obligatoires : *</span><button className="button button-primary" type="submit" disabled={submitting}>{submitting ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}Enregistrer sur IPFS et Base Sepolia</button></div>
+              <div className="form-actions"><span>Champs obligatoires : *</span><button className="button button-primary" type="submit" disabled={submitting || !walletReady}>{submitting ? <LoaderCircle className="spin" size={16} /> : <Wallet size={16} />}Préparer et signer avec MetaMask</button></div>
             </form>
           </section>
-          <aside className="media-help"><span className="feature-icon teal"><ShieldCheck size={23} /></span><h3>Une provenance publique</h3><p>Le serveur calcule les empreintes, ajoute un manifeste C2PA, publie le fichier signé et son JSON sur IPFS, puis signe la transaction Base Sepolia.</p><div className="help-divider" /><h4>Preuves conservées</h4><p>Manifeste C2PA, CID, empreintes visuelles, SHA-256 du JSON, reçu et bloc du contrat.</p><h4>Attention</h4><p>Le certificat C2PA de test ne crée pas une confiance de production. Un désépinglage Pinata ne supprime pas les copies conservées ailleurs.</p><span className="tag green">C2PA · IPFS · Base Sepolia</span></aside>
+          <aside className="media-help"><span className="feature-icon teal"><ShieldCheck size={23} /></span><h3>Votre portefeuille signe</h3><p>Le serveur calcule les empreintes, ajoute C2PA et publie sur IPFS. MetaMask affiche ensuite la transaction exacte à confirmer.</p><div className="help-divider" /><h4>Preuves conservées</h4><p>Adresse du signataire, manifeste C2PA, CID, empreintes, reçu et bloc du contrat.</p><h4>Attention</h4><p>Le registre est public : la première adresse qui inscrit un SHA-256 en devient le publicateur on-chain. Vérifiez toujours la transaction MetaMask.</p><span className="tag green">MetaMask · Base Sepolia</span></aside>
         </div>
         <ImageLibrary images={images} query={query} setQuery={setQuery} search={() => void refreshImages()} setActiveImage={setActiveImage} retry={retryRegistration} deleting={deleteCandidate} setDeleting={setDeleteCandidate} remove={remove} submitting={submitting} />
       </>}
@@ -179,7 +271,7 @@ function AuthPanel({ mode, setMode, submit, submitting, error }: { mode: AuthMod
 
 function ImageLibrary({ images, query, setQuery, search, setActiveImage, retry, deleting, setDeleting, remove, submitting }: { images: ApiImage[]; query: string; setQuery: (value: string) => void; search: () => void; setActiveImage: (image: ApiImage) => void; retry: (image: ApiImage) => Promise<void>; deleting: string | null; setDeleting: (id: string | null) => void; remove: (image: ApiImage) => Promise<void>; submitting: boolean }) {
   return <section className="panel library-panel"><div className="library-header"><div><span className="step-label">VOTRE BIBLIOTHÈQUE</span><h2>Les preuves publiées</h2></div><form className="search-field" onSubmit={event => { event.preventDefault(); search(); }}><Search size={16} /><input aria-label="Rechercher une image" value={query} onChange={event => setQuery(event.target.value)} placeholder="Rechercher une photo…" /></form></div>
-    {images.length ? <div className="table-scroll"><table><thead><tr><th>Photo</th><th>Auteur</th><th>Statut</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{images.map(image => <tr key={image.id}><td><button className="draft-title" onClick={() => setActiveImage(image)}><span className="draft-file-icon"><FileImage size={20} /></span><span><strong>{image.title}</strong><small>{image.original_filename} · {formatSize(image.size_bytes)}</small></span></button></td><td>{image.author}</td><td><span className={`tag ${image.status === "registered" ? "green" : ""}`}>{statusLabels[image.status]}</span></td><td><div className="row-actions">{retryableStatuses.has(image.status) && <button className="icon-button" aria-label={`Réessayer l’enregistrement de ${image.title}`} disabled={submitting} onClick={() => void retry(image)}><RotateCcw size={17} /></button>}<button className="icon-button" aria-label={`Exporter ${image.title}`} onClick={() => exportImage(image)}><Download size={17} /></button>{image.status !== "revoked" && <button className="icon-button danger" aria-label={`${image.blockchain_tx_hash ? "Révoquer" : "Supprimer"} ${image.title}`} onClick={() => setDeleting(image.id)}>{image.blockchain_tx_hash ? <Ban size={17} /> : <Trash2 size={17} />}</button>}</div>{deleting === image.id && <div className="delete-confirm"><span>{image.blockchain_tx_hash ? "Révoquer cette preuve ?" : "Supprimer cette publication ?"}</span><button onClick={() => void remove(image)}>{image.blockchain_tx_hash ? "Révoquer" : "Supprimer"}</button><button onClick={() => setDeleting(null)}>Annuler</button></div>}</td></tr>)}</tbody></table></div>
+    {images.length ? <div className="table-scroll"><table><thead><tr><th>Photo</th><th>Auteur</th><th>Statut</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>{images.map(image => <tr key={image.id}><td><button className="draft-title" onClick={() => setActiveImage(image)}><span className="draft-file-icon"><FileImage size={20} /></span><span><strong>{image.title}</strong><small>{image.original_filename} · {formatSize(image.size_bytes)}</small></span></button></td><td>{image.author}</td><td><span className={`tag ${image.status === "registered" ? "green" : ""}`}>{statusLabels[image.status]}</span></td><td><div className="row-actions">{retryableStatuses.has(image.status) && <button className="icon-button" aria-label={`Réessayer l’enregistrement de ${image.title}`} disabled={submitting} onClick={() => void retry(image)}><RotateCcw size={17} /></button>}<button className="icon-button" aria-label={`Exporter ${image.title}`} onClick={() => exportImage(image)}><Download size={17} /></button>{image.status !== "revoked" && <button className="icon-button danger" aria-label={`${image.status === "registered" ? "Révoquer" : "Supprimer"} ${image.title}`} onClick={() => setDeleting(image.id)}>{image.status === "registered" ? <Ban size={17} /> : <Trash2 size={17} />}</button>}</div>{deleting === image.id && <div className="delete-confirm"><span>{image.status === "registered" ? "Révoquer cette preuve ?" : "Supprimer cette publication ?"}</span><button onClick={() => void remove(image)}>{image.status === "registered" ? "Révoquer" : "Supprimer"}</button><button onClick={() => setDeleting(null)}>Annuler</button></div>}</td></tr>)}</tbody></table></div>
       : <div className="empty-library"><FileImage size={30} strokeWidth={1.3} /><h3>{query ? "Aucun résultat" : "Votre première preuve commence ici."}</h3><p>{query ? "Lancez une autre recherche." : "Les images publiées apparaîtront ici."}</p></div>}
   </section>;
 }

@@ -71,6 +71,20 @@ type TokenResponse = {
 
 type ImagePage = { items: ApiImage[]; total: number; limit: number; offset: number };
 
+export type WalletTransaction = {
+  chain_id: number;
+  chain_id_hex: string;
+  contract_address: string;
+  from_address: string;
+  data: string;
+  value: string;
+};
+
+export type WalletActionResponse = {
+  image: ApiImage;
+  transaction: WalletTransaction | null;
+};
+
 export type VerificationMatch = {
   matched_by: "exact" | "perceptual" | "local_features";
   confidence: number;
@@ -143,7 +157,7 @@ async function request<T>(path: string, init: RequestInit = {}, token?: string):
   }
   let response: Response;
   try { response = await fetch(`${API_URL}${path}`, { ...init, headers }); }
-  catch { throw new ApiError("L’API Prisme est inaccessible. Vérifiez qu’elle fonctionne sur le port 8000.", 0); }
+  catch { throw new ApiError("L’API Prisme est inaccessible. Vérifiez sa disponibilité et la configuration CORS.", 0); }
   if (!response.ok) {
     let message = `La requête a échoué (${response.status}).`;
     try {
@@ -187,8 +201,11 @@ export function listImages(token: string, search = "") {
   const query = search.trim() ? `?search=${encodeURIComponent(search.trim())}` : "";
   return request<ImagePage>(`/api/v1/images${query}`, {}, token);
 }
-export function createImage(token: string, form: FormData) { return request<ApiImage>("/api/v1/images", { method: "POST", body: form }, token); }
-export function retryImageRegistration(token: string, id: string) { return request<ApiImage>(`/api/v1/images/${encodeURIComponent(id)}/retry-registration`, { method: "POST" }, token); }
+export function createImage(token: string, form: FormData) { return request<WalletActionResponse>("/api/v1/images", { method: "POST", body: form }, token); }
+export function prepareImageRegistration(token: string, id: string) { return request<WalletActionResponse>(`/api/v1/images/${encodeURIComponent(id)}/prepare-registration`, { method: "POST" }, token); }
+export function confirmImageRegistration(token: string, id: string, transactionHash: string) { return request<ApiImage>(`/api/v1/images/${encodeURIComponent(id)}/confirm-registration`, { method: "POST", body: JSON.stringify({ transaction_hash: transactionHash }) }, token); }
+export function prepareImageRevocation(token: string, id: string) { return request<WalletActionResponse>(`/api/v1/images/${encodeURIComponent(id)}/prepare-revocation`, { method: "POST" }, token); }
+export function confirmImageRevocation(token: string, id: string, transactionHash: string) { return request<ApiImage>(`/api/v1/images/${encodeURIComponent(id)}/confirm-revocation`, { method: "POST", body: JSON.stringify({ transaction_hash: transactionHash }) }, token); }
 export function deleteImage(token: string, id: string) { return request<void>(`/api/v1/images/${encodeURIComponent(id)}`, { method: "DELETE" }, token); }
 export function verifyImage(file: File) {
   const form = new FormData();

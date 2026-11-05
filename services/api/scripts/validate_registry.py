@@ -1,4 +1,4 @@
-"""Validate the public Base Sepolia registry and the configured signer."""
+"""Validate the open Base Sepolia registry used by browser wallets."""
 
 import asyncio
 
@@ -16,30 +16,18 @@ async def main() -> None:
 
     chain_id = await web3.eth.chain_id
     code = await web3.eth.get_code(address)
-    owner = Web3.to_checksum_address(await contract.functions.owner().call())
-    balance = await web3.eth.get_balance(owner)
+    registration_open = bool(await contract.functions.registrationOpen().call())
     print("CHAIN_ID", chain_id)
     print("BYTECODE_BYTES", len(code))
-    print("OWNER", owner)
-    print("OWNER_BALANCE_ETH", Web3.from_wei(balance, "ether"))
+    print("CONTRACT", address)
+    print("REGISTRATION_OPEN", registration_open)
 
     if chain_id != settings.base_chain_id:
         raise RuntimeError("The RPC chain ID does not match the configuration")
     if not code:
         raise RuntimeError("The registry has no bytecode")
-
-    if settings.registry_private_key is None:
-        print("SIGNER_KEY", "MISSING")
-        return
-    signer = web3.eth.account.from_key(
-        settings.registry_private_key.get_secret_value()
-    ).address
-    authorized = await contract.functions.authorizedPublishers(signer).call()
-    print("SIGNER", signer)
-    print("SIGNER_IS_OWNER", Web3.to_checksum_address(signer) == owner)
-    print("SIGNER_AUTHORIZED", bool(authorized))
-    if Web3.to_checksum_address(signer) != owner or not authorized:
-        raise RuntimeError("The configured signer cannot publish to the registry")
+    if not registration_open:
+        raise RuntimeError("The configured registry is not open to browser wallets")
 
 
 if __name__ == "__main__":

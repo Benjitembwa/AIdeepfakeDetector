@@ -146,6 +146,11 @@ h2 { font-size: 17px; font-weight: 550; letter-spacing: -.45px; line-height: 1.4
 .pending-grid strong { font-size: 11px; color: var(--ink); font-weight: 550; }
 .pending-grid span { font-size: 10px; color: var(--muted); }
 .media-notice { margin-bottom: 27px; }
+.wallet-panel { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 20px; margin-bottom: 24px; }
+.wallet-copy { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.wallet-copy strong { display: block; font-size: 12px; font-weight: 600; }
+.wallet-copy p { color: var(--muted); font-size: 11px; margin-top: 3px; overflow-wrap: anywhere; }
+.wallet-panel .row-actions { align-items: center; gap: 10px; flex-shrink: 0; }
 .login-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 50px; align-items: center; padding: 12px 0 40px; }
 .login-panel { padding: 32px; }
 .login-panel h2 { font-size: 21px; margin: 18px 0 12px; }
@@ -292,5 +297,8 @@ td, .draft-title strong { font-size: 12px; }
   .demo-strip .button { margin-left: 0; width: 100%; }
   .media-heading { flex-wrap: wrap; }
   .media-heading > .tag { margin-left: 58px; }
+  .wallet-panel { align-items: stretch; flex-direction: column; }
+  .wallet-panel .row-actions { align-items: stretch; flex-direction: column; }
+  .wallet-panel .button { width: 100%; }
   .tag { white-space: normal; }
 }

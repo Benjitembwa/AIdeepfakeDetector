@@ -9,21 +9,22 @@
 | Base de données | PostgreSQL Neon, SQLAlchemy, Alembic, psycopg 3 | Connectée |
 | Analyse IA | Sightengine (`genai`, `deepfake`) | Intégrée à la vérification publique |
 | Images similaires | Pillow, imagehash, OpenCV ORB et RANSAC | Implémentées |
-| Registre | Solidity, Remix IDE, web3.py, Base Sepolia | Contrat déployé et intégré à FastAPI |
+| Registre | Solidity, Remix IDE, web3.py, MetaMask, Base Sepolia | Contrat ouvert prêt à déployer et intégré |
 | Fichiers | IPFS public via Pinata | Intégré |
 | Provenance | c2pa-python 0.38 | Intégrée avec certificat de test |
 
 ## Flux actuel
 
 ```text
-Navigateur
-   │  compte/JWT (média) ou vérification publique, formulaire multipart
+Navigateur + MetaMask
+   ├─ compte/JWT (média), formulaire multipart
+   ├─ confirmation manuelle ──► Base Sepolia
    ▼
 FastAPI :8000
    ├─ validation, SHA-256, pHash/dHash/wHash, ORB + RANSAC
    ├─ C2PA : signature à la publication et lecture à la vérification
    ├─ Pinata/IPFS : image signée et JSON canonique publics
-   ├─ Base Sepolia : registre de preuves et révocations
+   ├─ Base Sepolia : lecture et vérification des reçus
    ├─ PostgreSQL Neon : comptes, preuves, reçus et états de reprise
    └─ Sightengine : probabilités genai et deepfake
 ```
@@ -49,14 +50,15 @@ Les migrations `20261031_01`, `20261031_02`, `20261031_03` et `20261101_04` ajou
 - Le mot de passe brut n'est jamais stocké ; Argon2 produit le hachage.
 - Le navigateur ne reçoit jamais la connexion PostgreSQL ni la clé de signature JWT.
 - Les identifiants Sightengine restent uniquement dans les variables d'environnement de FastAPI.
-- Le JWT Pinata et la clé privée Base Sepolia restent uniquement dans FastAPI.
-- L'API vérifie Chain ID, bytecode, propriétaire et autorisation avant toute publication.
-- Un verrou applicatif sérialise les nonces ; le prototype fonctionne avec un seul worker.
+- Le JWT Pinata reste uniquement dans FastAPI ; aucune clé MetaMask n'est transmise au serveur.
+- L'API vérifie Chain ID, bytecode et ouverture du contrat avant de préparer une publication.
+- L'API vérifie ensuite le destinataire, l'émetteur, le calldata et le reçu de chaque transaction.
 - L'API valide de nouveau type, taille, décodage et dimensions, même si le site les contrôle déjà.
 - Un média ne peut pas lire, reprendre ou révoquer la preuve d'un autre média.
 - L'inscription est ouverte pour ce prototype. Une validation administrative des médias sera nécessaire avant une utilisation publique.
 - Le jeton d'accès expire après 30 minutes et n'est pas placé dans `localStorage`.
-- La blockchain enregistrera une déclaration et son auteur autorisé, pas la vérité d'une scène.
+- La blockchain enregistre une déclaration et son portefeuille publicateur, pas la vérité d'une scène.
+- Le premier portefeuille qui enregistre un SHA-256 le réserve ; le registre ouvert reste exposé au front-running.
 - Une signature C2PA valide et la confiance accordée au signataire restent deux questions distinctes.
 
 ## API
@@ -72,8 +74,11 @@ Les migrations `20261031_01`, `20261031_02`, `20261031_03` et `20261101_04` ajou
 | `POST /api/v1/images` | JWT | Publier sur IPFS et Base Sepolia |
 | `POST /api/v1/verify` | Non | Rechercher une origine exacte ou visuellement proche |
 | `GET /api/v1/images/{id}` | JWT | Consulter ses preuves |
-| `POST /api/v1/images/{id}/retry-registration` | JWT | Reprendre une transaction idempotemment |
-| `DELETE /api/v1/images/{id}` | JWT | Révoquer puis désépingler |
+| `POST /api/v1/images/{id}/prepare-registration` | JWT | Préparer/reprendre `registerImage` |
+| `POST /api/v1/images/{id}/confirm-registration` | JWT | Vérifier le reçu MetaMask |
+| `POST /api/v1/images/{id}/prepare-revocation` | JWT | Préparer `revokeImage` |
+| `POST /api/v1/images/{id}/confirm-revocation` | JWT | Confirmer puis désépingler |
+| `DELETE /api/v1/images/{id}` | JWT | Supprimer une publication non inscrite |
 
 ## Configuration
 

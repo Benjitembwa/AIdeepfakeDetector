@@ -1,17 +1,16 @@
-import asyncio
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from hexbytes import HexBytes
 from web3 import AsyncHTTPProvider, AsyncWeb3, Web3
-from web3.exceptions import TimeExhausted, TransactionNotFound
+from web3.exceptions import TransactionNotFound
 
 from app.core.config import get_settings
 
-ABI_PATH = Path(__file__).with_name("PrismeImageRegistry.abi.json")
+ABI_PATH = Path(__file__).with_name("PrismeOpenImageRegistry.abi.json")
 REGISTRY_ABI = json.loads(ABI_PATH.read_text(encoding="utf-8"))
-_transaction_lock = asyncio.Lock()
 
 
 class RegistryUnavailable(RuntimeError):
@@ -44,53 +43,51 @@ class TransactionOutcome:
     block_number: int | None = None
 
 
+@dataclass(frozen=True)
+class WalletTransaction:
+    chain_id: int
+    chain_id_hex: str
+    contract_address: str
+    from_address: str
+    data: str
+    value: str = "0x0"
+
+
 class BlockchainRegistry:
-    def __init__(self) -> None:
+    def __init__(self, contract_address: str | None = None) -> None:
         self.settings = get_settings()
         self.w3 = AsyncWeb3(AsyncHTTPProvider(self.settings.base_rpc_url))
         self.contract_address = Web3.to_checksum_address(
-            self.settings.registry_contract_address
+            contract_address or self.settings.registry_contract_address
         )
         self.contract = self.w3.eth.contract(
             address=self.contract_address,
             abi=REGISTRY_ABI,
         )
 
-    def _private_key(self) -> str:
-        if self.settings.registry_private_key is None:
-            raise RegistryConfigurationError(
-                "La clé privée Base Sepolia n'est pas configurée."
-            )
-        return self.settings.registry_private_key.get_secret_value()
-
-    @property
-    def publisher_address(self) -> str:
-        return self.w3.eth.account.from_key(self._private_key()).address
-
-    async def validate_configuration(self) -> None:
+    async def validate_configuration(self, *, require_open: bool = True) -> None:
         try:
             chain_id = await self.w3.eth.chain_id
             code = await self.w3.eth.get_code(self.contract_address)
-            owner = await self.contract.functions.owner().call()
-            authorized = await self.contract.functions.authorizedPublishers(
-                self.publisher_address
-            ).call()
         except Exception as exc:
             raise RegistryUnavailable("Base Sepolia est temporairement indisponible.") from exc
         if chain_id != self.settings.base_chain_id:
             raise RegistryConfigurationError("Le RPC ne correspond pas à Base Sepolia.")
         if not code:
-            raise RegistryConfigurationError("Le contrat configuré ne contient aucun bytecode.")
-        if Web3.to_checksum_address(owner) != Web3.to_checksum_address(
-            self.publisher_address
-        ):
             raise RegistryConfigurationError(
-                "La clé configurée ne correspond pas au propriétaire du contrat."
+                "Le contrat configuré ne contient aucun bytecode."
             )
-        if not authorized:
-            raise RegistryConfigurationError(
-                "L'adresse de publication n'est pas autorisée par le contrat."
-            )
+        if require_open:
+            try:
+                is_open = bool(await self.contract.functions.registrationOpen().call())
+            except Exception as exc:
+                raise RegistryConfigurationError(
+                    "Le contrat configuré n'est pas le registre public Prisme."
+                ) from exc
+            if not is_open:
+                raise RegistryConfigurationError(
+                    "Le contrat configuré n'accepte pas les publications publiques."
+                )
 
     async def exists(self, image_sha256: str) -> bool:
         try:
@@ -123,43 +120,7 @@ class BlockchainRegistry:
             metadata_cid=str(item[10]),
         )
 
-    async def _send(self, function: object) -> TransactionOutcome:
-        async with _transaction_lock:
-            try:
-                address = self.publisher_address
-                nonce = await self.w3.eth.get_transaction_count(address, "pending")
-                transaction = await function.build_transaction(
-                    {
-                        "from": address,
-                        "nonce": nonce,
-                        "chainId": self.settings.base_chain_id,
-                    }
-                )
-                signed = self.w3.eth.account.sign_transaction(
-                    transaction, private_key=self._private_key()
-                )
-                tx_hash_bytes = await self.w3.eth.send_raw_transaction(
-                    signed.raw_transaction
-                )
-                tx_hash = tx_hash_bytes.hex()
-            except Exception as exc:
-                raise RegistryUnavailable("La transaction blockchain a été refusée.") from exc
-        try:
-            receipt = await self.w3.eth.wait_for_transaction_receipt(
-                tx_hash,
-                timeout=self.settings.blockchain_receipt_timeout_seconds,
-            )
-        except TimeExhausted:
-            return TransactionOutcome(state="pending", tx_hash=tx_hash)
-        if int(receipt["status"]) != 1:
-            return TransactionOutcome(state="failed", tx_hash=tx_hash)
-        return TransactionOutcome(
-            state="confirmed",
-            tx_hash=tx_hash,
-            block_number=int(receipt["blockNumber"]),
-        )
-
-    async def register_image(
+    def registration_transaction(
         self,
         *,
         image_sha256: str,
@@ -170,22 +131,43 @@ class BlockchainRegistry:
         metadata_cid: str,
         metadata_sha256: str,
         media_id: bytes,
-    ) -> TransactionOutcome:
-        function = self.contract.functions.registerImage(
-            bytes.fromhex(image_sha256),
-            int(perceptual_hash, 16),
-            int(difference_hash, 16),
-            int(wavelet_hash, 16),
-            image_cid,
-            metadata_cid,
-            bytes.fromhex(metadata_sha256),
-            media_id,
+        publisher_address: str,
+    ) -> WalletTransaction:
+        sender = Web3.to_checksum_address(publisher_address)
+        data = self.contract.encode_abi(
+            "registerImage",
+            args=[
+                bytes.fromhex(image_sha256),
+                int(perceptual_hash, 16),
+                int(difference_hash, 16),
+                int(wavelet_hash, 16),
+                image_cid,
+                metadata_cid,
+                bytes.fromhex(metadata_sha256),
+                media_id,
+            ],
         )
-        return await self._send(function)
+        return WalletTransaction(
+            chain_id=self.settings.base_chain_id,
+            chain_id_hex=hex(self.settings.base_chain_id),
+            contract_address=self.contract_address,
+            from_address=sender,
+            data=data,
+        )
 
-    async def revoke_image(self, image_sha256: str) -> TransactionOutcome:
-        return await self._send(
-            self.contract.functions.revokeImage(bytes.fromhex(image_sha256))
+    def revocation_transaction(
+        self, image_sha256: str, *, publisher_address: str
+    ) -> WalletTransaction:
+        sender = Web3.to_checksum_address(publisher_address)
+        data = self.contract.encode_abi(
+            "revokeImage", args=[bytes.fromhex(image_sha256)]
+        )
+        return WalletTransaction(
+            chain_id=self.settings.base_chain_id,
+            chain_id_hex=hex(self.settings.base_chain_id),
+            contract_address=self.contract_address,
+            from_address=sender,
+            data=data,
         )
 
     async def transaction_receipt(self, tx_hash: str) -> TransactionOutcome:
@@ -201,6 +183,47 @@ class BlockchainRegistry:
             block_number=int(receipt["blockNumber"]),
         )
 
+    async def verified_transaction_receipt(
+        self,
+        tx_hash: str,
+        *,
+        expected_sender: str,
+        expected_data: str,
+    ) -> TransactionOutcome:
+        outcome = await self.transaction_receipt(tx_hash)
+        if outcome.state == "pending":
+            return outcome
+        try:
+            transaction = await self.w3.eth.get_transaction(tx_hash)
+            target = transaction.get("to")
+            sender = transaction.get("from")
+            input_value = transaction.get("input", "0x")
+        except Exception as exc:
+            raise RegistryUnavailable("La transaction ne peut pas être vérifiée.") from exc
 
-def get_registry() -> BlockchainRegistry:
-    return BlockchainRegistry()
+        actual_data = (
+            input_value.hex()
+            if isinstance(input_value, (bytes, HexBytes))
+            else str(input_value)
+        )
+        if not actual_data.startswith("0x"):
+            actual_data = f"0x{actual_data}"
+        if target is None or Web3.to_checksum_address(target) != self.contract_address:
+            raise RegistryConfigurationError(
+                "La transaction ne cible pas le contrat Prisme configuré."
+            )
+        if sender is None or Web3.to_checksum_address(sender) != Web3.to_checksum_address(
+            expected_sender
+        ):
+            raise RegistryConfigurationError(
+                "La transaction n'a pas été signée par le portefeuille attendu."
+            )
+        if actual_data.lower() != expected_data.lower():
+            raise RegistryConfigurationError(
+                "Les données de la transaction divergent des preuves préparées."
+            )
+        return outcome
+
+
+def get_registry(contract_address: str | None = None) -> BlockchainRegistry:
+    return BlockchainRegistry(contract_address)

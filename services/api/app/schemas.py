@@ -129,6 +129,24 @@ class ImagePublic(BaseModel):
         return f"{base}/tx/{self.blockchain_tx_hash}"
 
 
+class WalletTransactionPublic(BaseModel):
+    chain_id: int
+    chain_id_hex: str
+    contract_address: str
+    from_address: str
+    data: str
+    value: str = "0x0"
+
+
+class WalletActionResponse(BaseModel):
+    image: ImagePublic
+    transaction: WalletTransactionPublic | None = None
+
+
+class TransactionConfirmation(BaseModel):
+    transaction_hash: str = Field(pattern=r"^0x[0-9a-fA-F]{64}$")
+
+
 class ImagePage(BaseModel):
     items: list[ImagePublic]
     total: int

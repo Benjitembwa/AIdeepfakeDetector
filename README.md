@@ -5,13 +5,13 @@ Prototype académique de vérification de provenance et de détection d'images g
 ## État actuel : étapes 1 à 9
 
 - **Visiteur (`/`)** : envoi d'une image et recherche publique d'une origine partenaire exacte ou visuellement proche.
-- **Média (`/medias`)** : publication automatique sur IPFS et Base Sepolia, reprise idempotente et révocation.
+- **Média (`/medias`)** : connexion MetaMask, publication IPFS, signature manuelle de chaque enregistrement ou révocation et reprise idempotente.
 - **API FastAPI** : authentification JWT, validation des images et route publique `POST /api/v1/verify`.
 - **Reconnaissance** : SHA-256, pHash, dHash, wHash et caractéristiques ORB validées géométriquement par RANSAC.
 - **Détection IA** : analyse Sightengine des indices de génération ou retouche par IA et des manipulations faciales de type deepfake.
 - **PostgreSQL Neon** : comptes, métadonnées et empreintes persistants, gérés par migrations Alembic.
 - **IPFS public** : image et JSON canonique téléversés via Pinata avec CIDv1.
-- **Registre** : contrat `PrismeImageRegistry` déployé sur Base Sepolia (`84532`) et appelé par FastAPI.
+- **Registre** : contrat ouvert `PrismeOpenImageRegistry` sur Base Sepolia (`84532`) ; tout portefeuille peut enregistrer et seul le publicateur initial peut révoquer.
 - **C2PA** : manifeste signé lors de la publication et contrôlé lors de la vérification publique.
 - **Rapport** : origine visuelle, preuve on-chain, C2PA et probabilités IA présentés séparément pour éviter un score global trompeur.
 - **Documentation API** : Swagger sur `http://127.0.0.1:8000/docs`.
@@ -47,7 +47,7 @@ services\api\.venv\Scripts\python.exe -m pip install -r services/api/requirement
 npm.cmd run api:migrate
 ```
 
-La connexion PostgreSQL, le JWT Pinata et la clé privée Base Sepolia se trouvent dans `services/api/.env`, exclu de Git. Le fichier `services/api/.env.example` contient uniquement un modèle sans secret. L'API doit être lancée avec un seul worker afin de sérialiser les nonces du compte signataire.
+La connexion PostgreSQL et le JWT Pinata se trouvent dans `services/api/.env`, exclu de Git. Le fichier `services/api/.env.example` contient uniquement un modèle sans secret. Aucune clé MetaMask n'est stockée par l'API : les transactions sont confirmées manuellement dans le navigateur.
 
 ## Vérifier le projet
 
@@ -58,7 +58,7 @@ npm.cmd run api:test
 npm.cmd run test:e2e
 ```
 
-Les tests API utilisent SQLite et des doubles Pinata/Base Sepolia. Ils couvrent publication, reprise, doublons, révocation, C2PA et preuve publique, ainsi que copie exacte, recompression et recadrage. Les tests Playwright simulent l'API pour vérifier l'interface indépendamment du réseau.
+Les tests API utilisent SQLite et des doubles Pinata/Base Sepolia. Ils couvrent préparation, confirmation par portefeuille, reprise, doublons, révocation, C2PA et preuve publique, ainsi que copie exacte, recompression et recadrage. Les tests Playwright simulent l'API et MetaMask pour vérifier l'interface indépendamment du réseau.
 
 ## Structure
 
@@ -85,7 +85,7 @@ Le jeton d'accès du média reste dans `sessionStorage` et expire après 30 minu
 6. ~~Contrat Solidity, Base Sepolia et IPFS public.~~ Implémentée.
 7. ~~Provenance C2PA et certificat de test.~~ Implémentée ; un certificat de confiance sera requis en production.
 8. ~~Rapport fondé sur les analyses réelles.~~ Implémenté sous forme d’indices séparés et documentés.
-9. ~~Validation automatisée de l'ensemble.~~ Implémentée ; le test on-chain réel requiert la clé du déployeur dans `.env`.
-10. Déploiements : site sur Vercel, API sur Hugging Face Spaces, registre sur Base Sepolia et fichiers IPFS via Pinata.
+9. ~~Validation automatisée de l'ensemble.~~ Implémentée ; le test on-chain réel requiert MetaMask et de l'ETH de test.
+10. Déploiements : site sur Vercel, API sur Render, registre sur Base Sepolia et fichiers IPFS via Pinata.
 
 Voir [l'architecture](docs/architecture.md), [le scénario de démonstration](docs/demo.md), [la validation réelle des étapes 6 et 7](docs/validation-etape-6.md) et [la documentation de l'API](services/api/README.md).

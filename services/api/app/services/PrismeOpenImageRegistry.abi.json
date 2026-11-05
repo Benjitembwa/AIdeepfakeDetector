@@ -1,7 +1,7 @@
 [
   {
-    "inputs": [{"internalType":"address","name":"","type":"address"}],
-    "name":"authorizedPublishers",
+    "inputs":[],
+    "name":"registrationOpen",
     "outputs":[{"internalType":"bool","name":"","type":"bool"}],
     "stateMutability":"view",
     "type":"function"
@@ -30,17 +30,10 @@
         {"internalType":"string","name":"imageCid","type":"string"},
         {"internalType":"string","name":"metadataCid","type":"string"}
       ],
-      "internalType":"struct PrismeImageRegistry.ImageRegistration",
+      "internalType":"struct PrismeOpenImageRegistry.ImageRegistration",
       "name":"",
       "type":"tuple"
     }],
-    "stateMutability":"view",
-    "type":"function"
-  },
-  {
-    "inputs":[],
-    "name":"owner",
-    "outputs":[{"internalType":"address","name":"","type":"address"}],
     "stateMutability":"view",
     "type":"function"
   },

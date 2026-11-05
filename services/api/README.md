@@ -25,13 +25,12 @@ PRISME_PINATA_GATEWAY=votre-domaine.mypinata.cloud
 PRISME_BASE_RPC_URL=https://sepolia.base.org
 PRISME_BASE_CHAIN_ID=84532
 PRISME_BASE_EXPLORER_URL=https://sepolia.basescan.org
-PRISME_REGISTRY_CONTRACT_ADDRESS=0x12DD566159a151Ab14009BC5d7624519C60c3647
-PRISME_REGISTRY_PRIVATE_KEY=...
+PRISME_REGISTRY_CONTRACT_ADDRESS=0xNOUVELLE_ADRESSE_DU_REGISTRE_OUVERT
 PRISME_C2PA_SIGN_CERT_PATH=tests/fixtures/c2pa/es256_certs.pem
 PRISME_C2PA_PRIVATE_KEY_PATH=tests/fixtures/c2pa/es256_private.key
 ```
 
-La clé Pinata doit autoriser l'envoi, la lecture et la suppression de fichiers publics. Le compte Base Sepolia doit être le propriétaire du contrat et posséder de l'ETH de test. Un seul worker API est requis : un verrou applicatif sérialise les transactions et protège les nonces de ce compte. Les identifiants C2PA inclus dans `tests/fixtures/c2pa` sont publics et réservés au prototype : le déploiement de production devra employer un certificat approuvé et protéger sa clé dans un KMS ou HSM.
+La clé Pinata doit autoriser l'envoi, la lecture et la suppression de fichiers publics. Chaque utilisateur paie ses propres frais de test depuis MetaMask ; l'API ne possède aucune clé blockchain. Les identifiants C2PA inclus dans `tests/fixtures/c2pa` sont publics et réservés au prototype : le déploiement de production devra employer un certificat approuvé et protéger sa clé dans un KMS ou HSM.
 
 ## Cycle de publication
 
@@ -40,12 +39,13 @@ La clé Pinata doit autoriser l'envoi, la lecture et la suppression de fichiers 
 1. signe un manifeste C2PA déclarant le média, l'auteur et l'empreinte du fichier source ;
 2. téléverse l'image signée publiquement sur Pinata avec CIDv1 ;
 3. crée un JSON canonique et téléverse celui-ci ;
-4. appelle `registerImage()` et attend le reçu ;
-5. conserve le manifeste, les CID, identifiants Pinata, preuves et reçu dans PostgreSQL.
+4. renvoie au navigateur le calldata exact de `registerImage()` ;
+5. MetaMask demande une confirmation manuelle puis envoie la transaction ;
+6. l'API vérifie le reçu, le contrat, l'adresse émettrice et le calldata avant de conserver le bloc dans PostgreSQL.
 
-La route renvoie `201` si le reçu est confirmé, `202` si l'état est récupérable et `409` pour un doublon. `POST /api/v1/images/{id}/retry-registration` vérifie le reçu et `getImage()` avant tout nouvel envoi. La reprise est idempotente.
+La route renvoie `201` avec l'image préparée et la transaction à signer. `POST /api/v1/images/{id}/confirm-registration` renvoie `202` si le reçu est encore en attente. `prepare-registration` vérifie le reçu et `getImage()` avant de proposer un nouvel envoi ; la reprise est idempotente.
 
-`DELETE /api/v1/images/{id}` appelle `revokeImage()` avant de désépingler une publication enregistrée. La ligne PostgreSQL est conservée avec le statut `revoked`. Une publication jamais inscrite peut être supprimée définitivement. Un désépinglage Pinata ne supprime pas les copies éventuellement conservées par d'autres nœuds IPFS.
+La révocation suit le même cycle `prepare-revocation` puis `confirm-revocation` et exige le portefeuille ayant créé la preuve. `DELETE` ne supprime que les publications jamais inscrites. Un désépinglage Pinata ne supprime pas les copies éventuellement conservées par d'autres nœuds IPFS.
 
 ## Routes principales
 
@@ -55,10 +55,13 @@ La route renvoie `201` si le reçu est confirmé, `202` si l'état est récupér
 | `POST /api/v1/auth/token` | Obtenir un jeton JWT |
 | `GET /api/v1/media/me` | Lire le média authentifié |
 | `GET /api/v1/images` | Rechercher ses publications |
-| `POST /api/v1/images` | Publier sur IPFS et Base Sepolia |
+| `POST /api/v1/images` | Publier sur IPFS et préparer `registerImage` |
 | `GET /api/v1/images/{id}` | Lire les preuves d'une publication |
-| `POST /api/v1/images/{id}/retry-registration` | Reprendre sans doublon |
-| `DELETE /api/v1/images/{id}` | Révoquer/désépingler ou supprimer |
+| `POST /api/v1/images/{id}/prepare-registration` | Obtenir/reprendre la transaction MetaMask |
+| `POST /api/v1/images/{id}/confirm-registration` | Vérifier et archiver le reçu |
+| `POST /api/v1/images/{id}/prepare-revocation` | Préparer `revokeImage` |
+| `POST /api/v1/images/{id}/confirm-revocation` | Vérifier la révocation et désépingler |
+| `DELETE /api/v1/images/{id}` | Supprimer une publication non inscrite |
 | `POST /api/v1/verify` | Reconnaissance, Sightengine, C2PA et preuve on-chain |
 
 La preuve publique vaut `verified`, `revoked`, `mismatch`, `not_registered` ou `unavailable`. La provenance C2PA vaut `valid`, `valid_untrusted`, `invalid`, `absent` ou `unavailable`. Une panne RPC ou C2PA ne bloque ni la reconnaissance d'origine ni Sightengine.
@@ -70,4 +73,4 @@ La preuve publique vaut `verified`, `revoked`, `mismatch`, `not_registered` ou `
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-Les tests utilisent des doubles Pinata et Base Sepolia et ne consomment ni quota, ni ETH. Ne jamais journaliser `PRISME_DATABASE_URL`, `PRISME_JWT_SECRET_KEY`, `PRISME_SIGHTENGINE_API_SECRET`, `PRISME_PINATA_JWT` ou `PRISME_REGISTRY_PRIVATE_KEY`.
+Les tests utilisent des doubles Pinata, Base Sepolia et portefeuille et ne consomment ni quota, ni ETH. Ne jamais journaliser `PRISME_DATABASE_URL`, `PRISME_JWT_SECRET_KEY`, `PRISME_SIGHTENGINE_API_SECRET` ou `PRISME_PINATA_JWT`.

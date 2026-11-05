@@ -8,15 +8,23 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
 from pydantic import ValidationError
 from sqlalchemy import func, or_, select
+from web3 import Web3
 
 from app.core.config import get_settings
 from app.db.models import ImageRecord, ImageStatus
 from app.dependencies import CurrentMediaDep, SessionDep
-from app.schemas import ImageMetadata, ImagePage, ImagePublic
+from app.schemas import (
+    ImageMetadata,
+    ImagePage,
+    ImagePublic,
+    TransactionConfirmation,
+    WalletActionResponse,
+    WalletTransactionPublic,
+)
 from app.services.blockchain import (
     BlockchainRegistry,
     RegistryUnavailable,
-    TransactionOutcome,
+    WalletTransaction,
     get_registry,
 )
 from app.services.c2pa_provenance import C2paUnavailable, sign_c2pa
@@ -29,41 +37,45 @@ router = APIRouter(prefix="/images", tags=["Images"])
 
 
 def _technical_error(exc: Exception) -> str:
-    """Store a useful category without leaking a secret or an upstream response."""
     return f"{type(exc).__name__}: opération externe non aboutie"[:500]
 
 
-def _apply_chain_identity(record: ImageRecord, registry: BlockchainRegistry) -> None:
-    settings = get_settings()
-    record.blockchain_chain_id = settings.base_chain_id
-    record.blockchain_contract_address = registry.contract_address
-    record.blockchain_publisher_address = registry.publisher_address
-
-
-async def _mark_registered(
-    record: ImageRecord,
-    registry: BlockchainRegistry,
-    outcome: TransactionOutcome,
-) -> None:
-    record.status = ImageStatus.REGISTERED
-    record.blockchain_tx_hash = outcome.tx_hash
-    record.blockchain_block_number = outcome.block_number
-    record.blockchain_registered_at = datetime.now(UTC)
-    record.registration_error = None
+def _normalize_wallet(value: str) -> str:
     try:
-        onchain = await registry.get_image(record.sha256 or "")
-    except RegistryUnavailable:
-        onchain = None
-    if onchain is not None:
-        record.blockchain_block_number = onchain.registered_block
-        record.blockchain_registered_at = onchain.registered_at
-        record.blockchain_publisher_address = onchain.publisher
+        return Web3.to_checksum_address(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Adresse de portefeuille invalide.") from exc
 
 
-async def _register_record(
+def _apply_chain_identity(
     record: ImageRecord,
     registry: BlockchainRegistry,
-) -> TransactionOutcome:
+    publisher_address: str | None = None,
+) -> None:
+    record.blockchain_chain_id = get_settings().base_chain_id
+    record.blockchain_contract_address = registry.contract_address
+    if publisher_address is not None:
+        record.blockchain_publisher_address = _normalize_wallet(publisher_address)
+
+
+def _public_transaction(transaction: WalletTransaction | None) -> WalletTransactionPublic | None:
+    if transaction is None:
+        return None
+    return WalletTransactionPublic(**transaction.__dict__)
+
+
+def _wallet_action(
+    record: ImageRecord, transaction: WalletTransaction | None = None
+) -> WalletActionResponse:
+    return WalletActionResponse(
+        image=ImagePublic.model_validate(record),
+        transaction=_public_transaction(transaction),
+    )
+
+
+def _registration_transaction(
+    record: ImageRecord, registry: BlockchainRegistry
+) -> WalletTransaction:
     required = (
         record.sha256,
         record.perceptual_hash,
@@ -72,11 +84,11 @@ async def _register_record(
         record.ipfs_cid,
         record.metadata_cid,
         record.metadata_sha256,
+        record.blockchain_publisher_address,
     )
     if any(value is None for value in required):
-        raise RegistryUnavailable("Les preuves à enregistrer sont incomplètes.")
-    _apply_chain_identity(record, registry)
-    outcome = await registry.register_image(
+        raise HTTPException(status_code=409, detail="Les preuves à enregistrer sont incomplètes.")
+    return registry.registration_transaction(
         image_sha256=record.sha256 or "",
         perceptual_hash=record.perceptual_hash or "",
         difference_hash=record.difference_hash or "",
@@ -85,17 +97,38 @@ async def _register_record(
         metadata_cid=record.metadata_cid or "",
         metadata_sha256=record.metadata_sha256 or "",
         media_id=media_id_digest(record.media_id),
+        publisher_address=record.blockchain_publisher_address or "",
     )
-    record.blockchain_tx_hash = outcome.tx_hash
-    if outcome.state == "confirmed":
-        await _mark_registered(record, registry, outcome)
-    elif outcome.state == "pending":
-        record.status = ImageStatus.BLOCKCHAIN_PENDING
-        record.registration_error = None
-    else:
-        record.status = ImageStatus.REGISTRATION_FAILED
-        record.registration_error = "La transaction blockchain a échoué."
-    return outcome
+
+
+async def _mark_registered(
+    record: ImageRecord,
+    registry: BlockchainRegistry,
+    *,
+    tx_hash: str | None,
+) -> None:
+    onchain = await registry.get_image(record.sha256 or "")
+    if onchain is None:
+        raise HTTPException(status_code=409, detail="La preuve n'existe pas dans le contrat.")
+    if not registry_matches_record(onchain, record, record.media_id):
+        raise HTTPException(status_code=409, detail="La preuve on-chain diverge des données locales.")
+    expected = _normalize_wallet(record.blockchain_publisher_address or "")
+    if Web3.to_checksum_address(onchain.publisher) != expected:
+        raise HTTPException(
+            status_code=409,
+            detail="La preuve a été enregistrée par un autre portefeuille.",
+        )
+    if onchain.revoked:
+        record.status = ImageStatus.REVOKED
+        record.revoked_at = record.revoked_at or datetime.now(UTC)
+        return
+    record.status = ImageStatus.REGISTERED
+    if tx_hash:
+        record.blockchain_tx_hash = tx_hash
+    record.blockchain_block_number = onchain.registered_block
+    record.blockchain_registered_at = onchain.registered_at
+    record.blockchain_publisher_address = onchain.publisher
+    record.registration_error = None
 
 
 async def _unpin_record(record: ImageRecord, pinata: PinataClient) -> list[str]:
@@ -110,6 +143,13 @@ async def _unpin_record(record: ImageRecord, pinata: PinataClient) -> list[str]:
         except PinataUnavailable as exc:
             errors.append(_technical_error(exc))
     return errors
+
+
+async def _finish_revocation(record: ImageRecord, pinata: PinataClient) -> None:
+    record.status = ImageStatus.REVOKED
+    record.revoked_at = record.revoked_at or datetime.now(UTC)
+    errors = await _unpin_record(record, pinata)
+    record.registration_error = "; ".join(errors) or None
 
 
 @router.get("", response_model=ImagePage)
@@ -148,18 +188,19 @@ async def list_images(
     )
 
 
-@router.post("", response_model=ImagePublic, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=WalletActionResponse, status_code=status.HTTP_201_CREATED)
 async def create_image(
-    response: Response,
     session: SessionDep,
     media: CurrentMediaDep,
     image: Annotated[UploadFile, File()],
     title: Annotated[str, Form(min_length=1, max_length=150)],
     author: Annotated[str, Form(min_length=1, max_length=100)],
     license: Annotated[str, Form(min_length=1, max_length=80)],
+    wallet_address: Annotated[str, Form(min_length=42, max_length=42)],
     source_url: Annotated[str | None, Form(max_length=500)] = None,
     description: Annotated[str | None, Form(max_length=1200)] = None,
-) -> ImageRecord:
+) -> WalletActionResponse:
+    publisher_address = _normalize_wallet(wallet_address)
     uploaded = await validate_upload(image)
     fingerprint = compute_fingerprint(uploaded.contents)
     try:
@@ -183,8 +224,8 @@ async def create_image(
     )
     if existing is not None:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Cette image possède déjà un enregistrement local. Utilisez la reprise si nécessaire.",
+            status_code=409,
+            detail="Cette image possède déjà un enregistrement local. Utilisez la reprise.",
         )
 
     registry = get_registry()
@@ -192,16 +233,13 @@ async def create_image(
         await registry.validate_configuration()
         if await registry.exists(fingerprint.sha256):
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
+                status_code=409,
                 detail="Cette empreinte SHA-256 existe déjà dans le registre Base Sepolia.",
             )
     except HTTPException:
         raise
     except RegistryUnavailable as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     filename = Path(image.filename or "image").name[:255] or "image"
     image_id = uuid4()
@@ -220,10 +258,7 @@ async def create_image(
             original_sha256=fingerprint.sha256,
         )
     except C2paUnavailable as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     now = datetime.now(UTC)
     record = ImageRecord(
@@ -259,6 +294,7 @@ async def create_image(
         created_at=now,
         updated_at=now,
     )
+    _apply_chain_identity(record, registry, publisher_address)
     pinata = get_pinata_client()
     image_file = None
     try:
@@ -285,10 +321,7 @@ async def create_image(
                 await pinata.delete_public(image_file.file_id)
             except PinataUnavailable:
                 pass
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
-        ) from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     record.metadata_cid = metadata_file.cid
     record.metadata_ipfs_file_id = metadata_file.file_id
@@ -297,18 +330,7 @@ async def create_image(
     session.add(record)
     await session.commit()
     await session.refresh(record)
-
-    try:
-        outcome = await _register_record(record, registry)
-        if outcome.state != "confirmed":
-            response.status_code = status.HTTP_202_ACCEPTED
-    except RegistryUnavailable as exc:
-        record.status = ImageStatus.REGISTRATION_FAILED
-        record.registration_error = _technical_error(exc)
-        response.status_code = status.HTTP_202_ACCEPTED
-    await session.commit()
-    await session.refresh(record)
-    return record
+    return _wallet_action(record, _registration_transaction(record, registry))
 
 
 async def owned_image_or_404(
@@ -321,10 +343,7 @@ async def owned_image_or_404(
         )
     )
     if record is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Image introuvable.",
-        )
+        raise HTTPException(status_code=404, detail="Image introuvable.")
     return record
 
 
@@ -335,58 +354,179 @@ async def read_image(
     return await owned_image_or_404(image_id, media.id, session)
 
 
-@router.post("/{image_id}/retry-registration", response_model=ImagePublic)
-async def retry_registration(
+@router.post("/{image_id}/prepare-registration", response_model=WalletActionResponse)
+async def prepare_registration(
     image_id: UUID,
+    session: SessionDep,
+    media: CurrentMediaDep,
+) -> WalletActionResponse:
+    record = await owned_image_or_404(image_id, media.id, session)
+    if record.status == ImageStatus.REVOKED:
+        raise HTTPException(status_code=409, detail="Une preuve révoquée ne peut pas être réenregistrée.")
+    registry = get_registry(record.blockchain_contract_address)
+    try:
+        await registry.validate_configuration()
+        _apply_chain_identity(record, registry)
+        expected = _registration_transaction(record, registry)
+        onchain = await registry.get_image(record.sha256 or "")
+        if onchain is not None:
+            await _mark_registered(record, registry, tx_hash=record.blockchain_tx_hash)
+            await session.commit()
+            await session.refresh(record)
+            return _wallet_action(record)
+        if record.blockchain_tx_hash:
+            outcome = await registry.verified_transaction_receipt(
+                record.blockchain_tx_hash,
+                expected_sender=expected.from_address,
+                expected_data=expected.data,
+            )
+            if outcome.state == "confirmed":
+                await _mark_registered(record, registry, tx_hash=outcome.tx_hash)
+                await session.commit()
+                await session.refresh(record)
+                return _wallet_action(record)
+            if outcome.state == "pending":
+                record.status = ImageStatus.BLOCKCHAIN_PENDING
+                await session.commit()
+                await session.refresh(record)
+                return _wallet_action(record)
+            record.blockchain_tx_hash = None
+        record.status = ImageStatus.IPFS_STORED
+        record.registration_error = None
+        await session.commit()
+        await session.refresh(record)
+        return _wallet_action(record, expected)
+    except HTTPException:
+        raise
+    except RegistryUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/{image_id}/confirm-registration", response_model=ImagePublic)
+async def confirm_registration(
+    image_id: UUID,
+    confirmation: TransactionConfirmation,
     response: Response,
     session: SessionDep,
     media: CurrentMediaDep,
 ) -> ImageRecord:
     record = await owned_image_or_404(image_id, media.id, session)
-    if record.status == ImageStatus.REVOKED:
-        raise HTTPException(status_code=409, detail="Une preuve révoquée ne peut pas être réenregistrée.")
-    if not record.ipfs_cid or not record.metadata_cid:
-        raise HTTPException(status_code=409, detail="Les preuves IPFS sont incomplètes.")
-
-    registry = get_registry()
+    registry = get_registry(record.blockchain_contract_address)
     try:
-        await registry.validate_configuration()
-        _apply_chain_identity(record, registry)
-        if record.blockchain_tx_hash:
-            receipt = await registry.transaction_receipt(record.blockchain_tx_hash)
-            if receipt.state == "pending":
-                record.status = ImageStatus.BLOCKCHAIN_PENDING
-                response.status_code = status.HTTP_202_ACCEPTED
-                await session.commit()
-                await session.refresh(record)
-                return record
-
-        onchain = await registry.get_image(record.sha256 or "")
-        if onchain is not None:
-            if not registry_matches_record(onchain, record, record.media_id):
-                raise HTTPException(status_code=409, detail="La preuve on-chain diverge des données locales.")
-            if onchain.revoked:
-                record.status = ImageStatus.REVOKED
-                record.revoked_at = record.revoked_at or datetime.now(UTC)
-                await session.commit()
-                raise HTTPException(status_code=409, detail="La preuve on-chain est déjà révoquée.")
-            outcome = TransactionOutcome(
-                state="confirmed",
-                tx_hash=record.blockchain_tx_hash or "",
-                block_number=onchain.registered_block,
-            )
-            await _mark_registered(record, registry, outcome)
+        expected = _registration_transaction(record, registry)
+        outcome = await registry.verified_transaction_receipt(
+            confirmation.transaction_hash,
+            expected_sender=expected.from_address,
+            expected_data=expected.data,
+        )
+        record.blockchain_tx_hash = confirmation.transaction_hash
+        if outcome.state == "pending":
+            record.status = ImageStatus.BLOCKCHAIN_PENDING
+            response.status_code = status.HTTP_202_ACCEPTED
+        elif outcome.state == "failed":
+            record.status = ImageStatus.REGISTRATION_FAILED
+            record.registration_error = "La transaction MetaMask a échoué."
         else:
-            outcome = await _register_record(record, registry)
-            if outcome.state != "confirmed":
-                response.status_code = status.HTTP_202_ACCEPTED
+            await _mark_registered(record, registry, tx_hash=outcome.tx_hash)
     except HTTPException:
         raise
     except RegistryUnavailable as exc:
-        record.status = ImageStatus.REGISTRATION_FAILED
-        record.registration_error = _technical_error(exc)
-        response.status_code = status.HTTP_202_ACCEPTED
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    await session.commit()
+    await session.refresh(record)
+    return record
 
+
+@router.post("/{image_id}/prepare-revocation", response_model=WalletActionResponse)
+async def prepare_revocation(
+    image_id: UUID,
+    session: SessionDep,
+    media: CurrentMediaDep,
+) -> WalletActionResponse:
+    record = await owned_image_or_404(image_id, media.id, session)
+    if record.status == ImageStatus.REVOKED:
+        return _wallet_action(record)
+    if record.status != ImageStatus.REGISTERED or not record.blockchain_publisher_address:
+        raise HTTPException(status_code=409, detail="Cette preuve n'est pas enregistrée.")
+    registry = get_registry(record.blockchain_contract_address)
+    try:
+        await registry.validate_configuration()
+        onchain = await registry.get_image(record.sha256 or "")
+        if onchain is None or not registry_matches_record(onchain, record, record.media_id):
+            raise HTTPException(status_code=409, detail="La preuve on-chain diverge des données locales.")
+        if Web3.to_checksum_address(onchain.publisher) != _normalize_wallet(
+            record.blockchain_publisher_address
+        ):
+            raise HTTPException(status_code=409, detail="Le portefeuille lié n'est pas le publicateur.")
+        if onchain.revoked:
+            await _finish_revocation(record, get_pinata_client())
+            await session.commit()
+            await session.refresh(record)
+            return _wallet_action(record)
+        transaction = registry.revocation_transaction(
+            record.sha256 or "",
+            publisher_address=record.blockchain_publisher_address,
+        )
+        if record.revocation_tx_hash:
+            outcome = await registry.verified_transaction_receipt(
+                record.revocation_tx_hash,
+                expected_sender=transaction.from_address,
+                expected_data=transaction.data,
+            )
+            if outcome.state == "confirmed":
+                onchain = await registry.get_image(record.sha256 or "")
+                if onchain and onchain.revoked:
+                    await _finish_revocation(record, get_pinata_client())
+                    await session.commit()
+                    await session.refresh(record)
+                    return _wallet_action(record)
+            elif outcome.state == "pending":
+                return _wallet_action(record)
+            else:
+                record.revocation_tx_hash = None
+        return _wallet_action(record, transaction)
+    except HTTPException:
+        raise
+    except RegistryUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/{image_id}/confirm-revocation", response_model=ImagePublic)
+async def confirm_revocation(
+    image_id: UUID,
+    confirmation: TransactionConfirmation,
+    response: Response,
+    session: SessionDep,
+    media: CurrentMediaDep,
+) -> ImageRecord:
+    record = await owned_image_or_404(image_id, media.id, session)
+    if not record.blockchain_publisher_address:
+        raise HTTPException(status_code=409, detail="Aucun portefeuille n'est lié à cette preuve.")
+    registry = get_registry(record.blockchain_contract_address)
+    transaction = registry.revocation_transaction(
+        record.sha256 or "",
+        publisher_address=record.blockchain_publisher_address,
+    )
+    try:
+        outcome = await registry.verified_transaction_receipt(
+            confirmation.transaction_hash,
+            expected_sender=transaction.from_address,
+            expected_data=transaction.data,
+        )
+        record.revocation_tx_hash = confirmation.transaction_hash
+        if outcome.state == "pending":
+            response.status_code = status.HTTP_202_ACCEPTED
+        elif outcome.state == "failed":
+            record.registration_error = "La transaction de révocation MetaMask a échoué."
+        else:
+            onchain = await registry.get_image(record.sha256 or "")
+            if onchain is None or not onchain.revoked:
+                raise HTTPException(status_code=409, detail="La révocation n'est pas confirmée on-chain.")
+            await _finish_revocation(record, get_pinata_client())
+    except HTTPException:
+        raise
+    except RegistryUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     await session.commit()
     await session.refresh(record)
     return record
@@ -395,57 +535,18 @@ async def retry_registration(
 @router.delete("/{image_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_image(
     image_id: UUID,
-    response: Response,
     session: SessionDep,
     media: CurrentMediaDep,
 ) -> None:
     record = await owned_image_or_404(image_id, media.id, session)
-    pinata = get_pinata_client()
-    has_ipfs = bool(record.ipfs_file_id or record.metadata_ipfs_file_id)
-
-    if not has_ipfs and record.status in {ImageStatus.DRAFT, ImageStatus.FINGERPRINTED}:
-        await session.delete(record)
-        await session.commit()
-        return
-
-    registry = get_registry()
-    try:
-        await registry.validate_configuration()
-        if record.revocation_tx_hash:
-            receipt = await registry.transaction_receipt(record.revocation_tx_hash)
-            if receipt.state == "pending":
-                response.status_code = status.HTTP_202_ACCEPTED
-                await session.commit()
-                return
-        onchain = await registry.get_image(record.sha256 or "")
-    except RegistryUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    if onchain is not None and not registry_matches_record(onchain, record, record.media_id):
-        raise HTTPException(status_code=409, detail="La preuve on-chain diverge des données locales.")
-
-    if onchain is not None and not onchain.revoked:
-        outcome = await registry.revoke_image(record.sha256 or "")
-        record.revocation_tx_hash = outcome.tx_hash
-        if outcome.state == "pending":
-            response.status_code = status.HTTP_202_ACCEPTED
-            record.registration_error = None
-            await session.commit()
-            return
-        if outcome.state != "confirmed":
-            record.registration_error = "La transaction de révocation a échoué."
-            await session.commit()
-            raise HTTPException(status_code=502, detail=record.registration_error)
-
-    if onchain is not None:
-        record.status = ImageStatus.REVOKED
-        record.revoked_at = datetime.now(UTC)
-        errors = await _unpin_record(record, pinata)
-        record.registration_error = "; ".join(errors) or None
-        await session.commit()
-        return
-
-    errors = await _unpin_record(record, pinata)
+    if record.status in {ImageStatus.REGISTERED, ImageStatus.REVOKED}:
+        raise HTTPException(
+            status_code=409,
+            detail="Une preuve enregistrée doit être révoquée manuellement avec MetaMask.",
+        )
+    if record.status == ImageStatus.BLOCKCHAIN_PENDING:
+        raise HTTPException(status_code=409, detail="La transaction blockchain est encore en attente.")
+    errors = await _unpin_record(record, get_pinata_client())
     if errors:
         record.status = ImageStatus.REGISTRATION_FAILED
         record.registration_error = "; ".join(errors)

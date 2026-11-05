@@ -6,6 +6,22 @@ from PIL import Image, ImageDraw
 
 from app.services.blockchain import TransactionOutcome
 
+WALLET = "0x9f06FcF98fDB0B374E63FdE559590bF2CA472E81"
+
+
+async def confirm_registration(
+    client: AsyncClient,
+    headers: dict[str, str],
+    image_id: str,
+    *,
+    tx_number: int = 1,
+):
+    return await client.post(
+        f"/api/v1/images/{image_id}/confirm-registration",
+        headers=headers,
+        json={"transaction_hash": f"0x{tx_number:064x}"},
+    )
+
 
 def png_file() -> bytes:
     output = io.BytesIO()
@@ -104,13 +120,21 @@ async def test_image_publication_revocation_and_media_isolation(client: AsyncCli
             "title": "Le marché au matin",
             "author": "Camille Test",
             "license": "Tous droits réservés",
+            "wallet_address": WALLET,
             "source_url": "https://example.test/reportage",
             "description": "Contexte du reportage.",
         },
         files={"image": ("marche.png", png_file(), "image/png")},
     )
     assert created.status_code == 201, created.text
-    image = created.json()
+    prepared = created.json()
+    assert prepared["transaction"]["from_address"] == WALLET
+    assert prepared["image"]["status"] == "ipfs_stored"
+    confirmed = await confirm_registration(
+        client, first_headers, prepared["image"]["id"]
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    image = confirmed.json()
     assert image["width"] == 16
     assert image["height"] == 12
     assert image["status"] == "registered"
@@ -133,8 +157,18 @@ async def test_image_publication_revocation_and_media_isolation(client: AsyncCli
     hidden = await client.get(f"/api/v1/images/{image['id']}", headers=second_headers)
     assert hidden.status_code == 404
 
-    deleted = await client.delete(f"/api/v1/images/{image['id']}", headers=first_headers)
-    assert deleted.status_code == 204
+    prepared_revocation = await client.post(
+        f"/api/v1/images/{image['id']}/prepare-revocation", headers=first_headers
+    )
+    assert prepared_revocation.status_code == 200
+    assert prepared_revocation.json()["transaction"]["from_address"] == WALLET
+    revoked = await client.post(
+        f"/api/v1/images/{image['id']}/confirm-revocation",
+        headers=first_headers,
+        json={"transaction_hash": f"0x{2:064x}"},
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["status"] == "revoked"
     archived = await client.get("/api/v1/images", headers=first_headers)
     assert archived.json()["total"] == 1
     assert archived.json()["items"][0]["status"] == "revoked"
@@ -147,7 +181,12 @@ async def test_invalid_upload_is_rejected(client: AsyncClient) -> None:
     response = await client.post(
         "/api/v1/images",
         headers=headers,
-        data={"title": "Faux", "author": "Test", "license": "CC0"},
+        data={
+            "title": "Faux",
+            "author": "Test",
+            "license": "CC0",
+            "wallet_address": WALLET,
+        },
         files={"image": ("texte.txt", b"not-an-image", "text/plain")},
     )
     assert response.status_code == 415
@@ -166,12 +205,18 @@ async def test_registered_image_is_recognized_exactly_and_after_transformations(
             "title": "La place au matin",
             "author": "Amina Exemple",
             "license": "CC BY 4.0",
+            "wallet_address": WALLET,
             "source_url": "https://example.test/place",
         },
         files={"image": ("place.png", original, "image/png")},
     )
     assert created.status_code == 201, created.text
-    assert created.json()["orb_descriptor_count"] > 20
+    prepared = created.json()
+    confirmed = await confirm_registration(
+        client, headers, prepared["image"]["id"], tx_number=3
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["orb_descriptor_count"] > 20
 
     exact = await client.post(
         "/api/v1/verify", files={"image": ("copie.png", original, "image/png")}
@@ -221,53 +266,65 @@ async def test_registered_image_is_recognized_exactly_and_after_transformations(
     assert unrelated.json()["match_count"] == 0
 
 
-async def test_pending_registration_is_retried_idempotently(
+async def test_pending_wallet_transaction_is_confirmed_idempotently(
     client: AsyncClient,
     external_services_stub: dict[str, object],
 ) -> None:
     account = await register(client)
     headers = {"Authorization": f"Bearer {account['access_token']}"}
     registry: Any = external_services_stub["registry"]
-    registry.next_registration_state = "pending"
-
     created = await client.post(
         "/api/v1/images",
         headers=headers,
-        data={"title": "Preuve en attente", "author": "Test", "license": "CC0"},
+        data={
+            "title": "Preuve en attente",
+            "author": "Test",
+            "license": "CC0",
+            "wallet_address": WALLET,
+        },
         files={"image": ("pending.png", png_file(), "image/png")},
     )
-    assert created.status_code == 202
-    payload = created.json()
-    assert payload["status"] == "blockchain_pending"
-    assert registry.counter == 1
+    assert created.status_code == 201
+    payload = created.json()["image"]
+    tx_hash = f"0x{4:064x}"
+    registry.transactions[tx_hash] = TransactionOutcome(
+        state="pending", tx_hash=tx_hash
+    )
 
-    still_pending = await client.post(
-        f"/api/v1/images/{payload['id']}/retry-registration", headers=headers
+    still_pending = await confirm_registration(
+        client, headers, payload["id"], tx_number=4
     )
     assert still_pending.status_code == 202
-    assert registry.counter == 1
+    assert still_pending.json()["status"] == "blockchain_pending"
 
-    registry.transactions[payload["blockchain_tx_hash"]] = TransactionOutcome(
-        state="failed", tx_hash=payload["blockchain_tx_hash"]
+    prepared_again = await client.post(
+        f"/api/v1/images/{payload['id']}/prepare-registration", headers=headers
     )
-    registry.next_registration_state = "confirmed"
-    confirmed = await client.post(
-        f"/api/v1/images/{payload['id']}/retry-registration", headers=headers
+    assert prepared_again.status_code == 200
+    assert prepared_again.json()["transaction"] is None
+
+    registry.transactions[tx_hash] = TransactionOutcome(
+        state="confirmed", tx_hash=tx_hash, block_number=52962712
     )
+    confirmed = await confirm_registration(client, headers, payload["id"], tx_number=4)
     assert confirmed.status_code == 200
     assert confirmed.json()["status"] == "registered"
-    assert registry.counter == 2
 
     reconciled = await client.post(
-        f"/api/v1/images/{payload['id']}/retry-registration", headers=headers
+        f"/api/v1/images/{payload['id']}/prepare-registration", headers=headers
     )
     assert reconciled.status_code == 200
-    assert registry.counter == 2
+    assert reconciled.json()["transaction"] is None
 
     duplicate = await client.post(
         "/api/v1/images",
         headers=headers,
-        data={"title": "Doublon", "author": "Test", "license": "CC0"},
+        data={
+            "title": "Doublon",
+            "author": "Test",
+            "license": "CC0",
+            "wallet_address": WALLET,
+        },
         files={"image": ("duplicate.png", png_file(), "image/png")},
     )
     assert duplicate.status_code == 409

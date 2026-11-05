@@ -18,15 +18,15 @@
 
 ## Parcours média connecté
 
-1. Ouvrir **Espace média**, puis **Créer un compte**.
-2. Renseigner un nom de média, une adresse e-mail et un mot de passe d'au moins 12 caractères.
+1. Ouvrir **Espace média**, cliquer sur **Connecter MetaMask** et accepter Base Sepolia.
+2. Créer un compte média avec un mot de passe d'au moins 12 caractères.
 3. Ajouter une image, son titre, le photographe, la licence et, si nécessaire, son URL et son contexte.
-4. Confirmer les droits et cliquer sur **Enregistrer sur IPFS et Base Sepolia**.
-5. Vérifier le statut C2PA, les deux liens IPFS, la transaction BaseScan, le bloc, le contrat et le signataire.
+4. Confirmer les droits, cliquer sur **Préparer et signer avec MetaMask**, puis contrôler et confirmer la transaction MetaMask.
+5. Vérifier le statut C2PA, les deux liens IPFS, la transaction BaseScan, le bloc, le contrat et le portefeuille signataire.
 6. Si la transaction est partielle, utiliser **Réessayer l'enregistrement** : la reprise vérifie d'abord le reçu et le contrat.
 7. Recharger la page : la session et les preuves PostgreSQL restent accessibles.
 8. Rechercher le titre, ouvrir le détail et exporter le JSON.
-9. Révoquer la preuve : la révocation doit être confirmée avant le désépinglage Pinata et la ligne PostgreSQL doit rester archivée.
+9. Révoquer la preuve et confirmer la seconde transaction dans MetaMask : le désépinglage Pinata ne commence qu'après le reçu et la ligne PostgreSQL reste archivée.
 10. Rappeler qu'un désépinglage n'efface pas les copies IPFS conservées ailleurs.
 11. Se déconnecter et vérifier que l'espace média demande une nouvelle authentification.
 

@@ -42,6 +42,7 @@ def canonical_metadata(
             "name": media.name,
             "slug": media.slug,
             "media_id_hash": media_id_digest(media.id).hex(),
+            "wallet_address": record.blockchain_publisher_address,
         },
         "storage": {"network": "ipfs", "image_cid": image_cid},
         "c2pa": {
