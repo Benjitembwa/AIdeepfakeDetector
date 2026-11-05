@@ -107,12 +107,26 @@ Après le déploiement, copier la nouvelle adresse du contrat puis configurer Re
 PRISME_BASE_RPC_URL=https://sepolia.base.org
 PRISME_BASE_CHAIN_ID=84532
 PRISME_BASE_EXPLORER_URL=https://sepolia.basescan.org
-PRISME_REGISTRY_CONTRACT_ADDRESS=0xNOUVELLE_ADRESSE
+PRISME_REGISTRY_CONTRACT_ADDRESS=0x00da0457fA85fb4b1d4632eb2D9397D94eeb9da8
 ```
 
 Il n'existe plus de variable `PRISME_REGISTRY_PRIVATE_KEY`. FastAPI ne signe et ne paie
 aucune transaction : il construit le calldata, puis vérifie le reçu envoyé par MetaMask.
 Chaque utilisateur doit disposer d'un peu d'ETH Base Sepolia.
+
+Le registre ouvert actif a été contrôlé sur le RPC Base Sepolia : le reçu vaut `1`,
+le bytecode est présent et `registrationOpen()` renvoie `true`.
+
+| Information | Valeur |
+| --- | --- |
+| Réseau | Base Sepolia |
+| Chain ID | `84532` |
+| Contrat actif | `0x00da0457fA85fb4b1d4632eb2D9397D94eeb9da8` |
+| Transaction | `0x1c3e5a975d0452fc82972993047cf40f063294e640d68eef065a2974a64aa861` |
+| Déployeur | `0x9f06FcF98fDB0B374E63FdE559590bF2CA472E81` |
+| Bloc | `54922239` |
+| Compilateur | `0.8.34+commit.80d5c536` |
+| Optimisation | activée, `200` runs |
 
 Le premier contrat reste un déploiement historique et ne doit plus être configuré comme
 registre actif :
