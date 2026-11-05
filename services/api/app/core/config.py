@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     jwt_secret_key: SecretStr
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    cors_origins: str = "https://a-ideepfake-detector.vercel.app,http://localhost:3000,http://127.0.0.1:3000"
     max_upload_bytes: int = 10 * 1024 * 1024
     verification_candidate_limit: int = 1000
     sightengine_api_user: SecretStr | None = None
