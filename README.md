@@ -1,4 +1,4 @@
-# Prisme — Authenticité des images et lutte contre les deepfakes
+# Authenticité des images et lutte contre les deepfakes
 
 [![Groupe](https://img.shields.io/badge/Groupe-46-205e4e)](#membres-du-groupe)
 [![Réseau](https://img.shields.io/badge/Blockchain-Base%20Sepolia-0052ff)](https://sepolia.basescan.org/address/0x00da0457fA85fb4b1d4632eb2D9397D94eeb9da8)
@@ -7,7 +7,7 @@
 [![Tests API](https://img.shields.io/badge/Tests%20API-17%20réussis-success)](#tests)
 [![Tests navigateur](https://img.shields.io/badge/Playwright-5%20réussis-success)](#tests)
 
-Prisme est une application web de vérification de provenance des images, de recherche d’origine et d’analyse des indices de génération ou de manipulation par intelligence artificielle.
+Une application web de vérification de provenance des images, de recherche d’origine et d’analyse des indices de génération ou de manipulation par intelligence artificielle.
 
 Elle combine :
 
